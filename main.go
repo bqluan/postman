@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/csv"
 	"fmt"
 	"html/template"
 	"io/ioutil"
@@ -13,22 +14,27 @@ import (
 )
 
 var (
-	from     string
-	subject  string
-	host     string
-	port     int
-	username string
-	password string
-	tmplFile string
+	from      string
+	subject   string
+	host      string
+	port      int
+	username  string
+	password  string
+	tmplFile  string
+	attach    string
+	recipient string
 
 	tmpl *template.Template
 )
 
 type Recipient struct {
-	Name  string
-	Title string
-	Email string
+	Name   string
+	Title  string
+	Email  string
+	Status string
 }
+
+var recipients []*Recipient
 
 func init() {
 	pflag.StringVarP(&from, "from", "f", "", "发信人邮件地址，例如 sender@example.com（必填）")
@@ -38,6 +44,8 @@ func init() {
 	pflag.StringVarP(&username, "username", "u", "", "用来登录SMTP服务器的用户名（必填）")
 	pflag.StringVarP(&password, "password", "p", "", "用来登录SMTP服务器的密码（必填）")
 	pflag.StringVarP(&tmplFile, "template", "t", "", "邮件正文模板文件名，请确保文件以UTF-8编码（必填）")
+	pflag.StringVarP(&attach, "attach", "a", "", "附件文件名")
+	pflag.StringVarP(&recipient, "recipient", "r", "", "收件人CSV文件名，请确保文件以UTF-8编码（必填）")
 }
 
 func makeSureRequiredFlagsExist() {
@@ -71,12 +79,17 @@ func makeSureRequiredFlagsExist() {
 		pflag.Usage()
 		os.Exit(1)
 	}
+	if recipient == "" {
+		fmt.Println("请填写收件人CSV文件名")
+		pflag.Usage()
+		os.Exit(1)
+	}
 }
 
-func sendTo(r *Recipient) {
+func sendTo(r *Recipient) error {
 	buf := new(bytes.Buffer)
 	if err := tmpl.Execute(buf, r); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	m := gomail.NewMessage()
@@ -84,18 +97,33 @@ func sendTo(r *Recipient) {
 	m.SetHeader("To", r.Email)
 	m.SetHeader("Subject", subject)
 	m.SetBody("text/html", buf.String())
+	if attach != "" {
+		m.Attach(attach)
+	}
 
 	d := gomail.NewPlainDialer(host, port, username, password)
 
-	if err := d.DialAndSend(m); err != nil {
-		log.Fatal(err)
+	return d.DialAndSend(m)
+}
+
+func saveState() error {
+	var records [][]string
+	for _, reci := range recipients {
+		records = append(records, []string{reci.Name, reci.Title, reci.Email, reci.Status})
 	}
+	f, err := os.OpenFile(recipient, os.O_WRONLY, 600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return csv.NewWriter(f).WriteAll(records)
 }
 
 func main() {
 	pflag.Parse()
 	makeSureRequiredFlagsExist()
 
+	// load template
 	buf, err := ioutil.ReadFile(tmplFile)
 	if err != nil {
 		log.Fatal(err)
@@ -105,11 +133,44 @@ func main() {
 		log.Fatal(err)
 	}
 
-	r := &Recipient{
-		Name:  "张三",
-		Title: "处长",
-		Email: "bingqian.luan@icloud.com",
+	// load recipients
+	f, err := os.Open(recipient)
+	if err != nil {
+		log.Fatal(err)
+	}
+	r := csv.NewReader(f)
+	records, err := r.ReadAll()
+	if err != nil {
+		log.Fatal(err)
+	}
+	f.Close()
+	for _, rec := range records {
+		recipients = append(recipients, &Recipient{
+			Name:   rec[0],
+			Title:  rec[1],
+			Email:  rec[2],
+			Status: rec[3],
+		})
 	}
 
-	sendTo(r)
+	fmt.Printf("Sending to %v recipients ", len(recipients))
+	for _, reci := range recipients {
+		if reci.Status == "ok" {
+			fmt.Print("✓")
+			continue
+		}
+		err := sendTo(reci)
+		if err == nil {
+			reci.Status = "ok"
+			fmt.Print("✓")
+		} else {
+			fmt.Print("✗")
+			fmt.Println(err)
+		}
+		err = saveState()
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+	fmt.Println()
 }
