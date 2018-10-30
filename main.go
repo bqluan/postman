@@ -165,12 +165,8 @@ func main() {
 			fmt.Print("✓")
 		} else {
 			fmt.Print("✗")
-			fmt.Println(err)
 		}
-		err = saveState()
-		if err != nil {
-			fmt.Println(err)
-		}
+		saveState()
 	}
 	fmt.Println()
 }
