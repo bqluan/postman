@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"html/template"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -14,12 +15,12 @@ import (
 )
 
 var (
-	from      string
-	subject   string
 	host      string
 	port      int
 	username  string
 	password  string
+	from      string
+	subject   string
 	tmplFile  string
 	attach    string
 	recipient string
@@ -39,13 +40,13 @@ var recipients []*Recipient
 func init() {
 	pflag.StringVarP(&from, "from", "f", "", "发信人邮件地址，例如 sender@example.com（必填）")
 	pflag.StringVarP(&subject, "subject", "s", "", "邮件标题（必填）")
-	pflag.StringVarP(&host, "host", "h", "", "SMTP服务器主机名或IP地址，例如 smtp.example.com（必填）")
-	pflag.IntVar(&port, "port", 25, "SMTP服务器端口号")
-	pflag.StringVarP(&username, "username", "u", "", "用来登录SMTP服务器的用户名（必填）")
-	pflag.StringVarP(&password, "password", "p", "", "用来登录SMTP服务器的密码（必填）")
-	pflag.StringVarP(&tmplFile, "template", "t", "", "邮件正文模板文件名，请确保文件以UTF-8编码（必填）")
+	pflag.StringVarP(&host, "host", "h", "", "SMTP 服务器主机名或 IP 地址，例如 smtp.example.com（必填）")
+	pflag.IntVar(&port, "port", 25, "SMTP 服务器端口号")
+	pflag.StringVarP(&username, "username", "u", "", "用来登录 SMTP 服务器的用户名（必填）")
+	pflag.StringVarP(&password, "password", "p", "", "用来登录 SMTP 服务器的密码（必填）")
+	pflag.StringVarP(&tmplFile, "template", "t", "", "邮件正文模板文件名，请确保文件以 UTF-8 编码（必填）")
 	pflag.StringVarP(&attach, "attach", "a", "", "附件文件名")
-	pflag.StringVarP(&recipient, "recipient", "r", "", "收件人CSV文件名，请确保文件以UTF-8编码（必填）")
+	pflag.StringVarP(&recipient, "recipient", "r", "", "收件人 CSV 文件名，请确保文件以 UTF-8 编码（必填）")
 }
 
 func makeSureRequiredFlagsExist() {
@@ -60,17 +61,17 @@ func makeSureRequiredFlagsExist() {
 		os.Exit(1)
 	}
 	if host == "" {
-		fmt.Println("请填写SMTP服务器主机名或IP地址")
+		fmt.Println("请填写 SMTP 服务器主机名或 IP 地址")
 		pflag.Usage()
 		os.Exit(1)
 	}
 	if username == "" {
-		fmt.Println("请填写用来登录SMTP服务器的用户名")
+		fmt.Println("请填写用来登录 SMTP 服务器的用户名")
 		pflag.Usage()
 		os.Exit(1)
 	}
 	if password == "" {
-		fmt.Println("请填写用来登录SMTP服务器的密码")
+		fmt.Println("请填写用来登录 SMTP 服务器的密码")
 		pflag.Usage()
 		os.Exit(1)
 	}
@@ -80,7 +81,7 @@ func makeSureRequiredFlagsExist() {
 		os.Exit(1)
 	}
 	if recipient == "" {
-		fmt.Println("请填写收件人CSV文件名")
+		fmt.Println("请填写收件人 CSV 文件名")
 		pflag.Usage()
 		os.Exit(1)
 	}
@@ -101,8 +102,7 @@ func sendTo(r *Recipient) error {
 		m.Attach(attach)
 	}
 
-	d := gomail.NewPlainDialer(host, port, username, password)
-
+	d := gomail.NewDialer(host, port, username, password)
 	return d.DialAndSend(m)
 }
 
@@ -111,12 +111,41 @@ func saveState() error {
 	for _, reci := range recipients {
 		records = append(records, []string{reci.Name, reci.Title, reci.Email, reci.Status})
 	}
+
 	f, err := os.OpenFile(recipient, os.O_WRONLY, 600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+
 	return csv.NewWriter(f).WriteAll(records)
+}
+
+func loadRecipients() error {
+	f, err := os.Open(recipient)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	for {
+		record, err := r.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		recipients = append(recipients, &Recipient{
+			Name:   record[0],
+			Title:  record[1],
+			Email:  record[2],
+			Status: record[3],
+		})
+	}
+
+	return nil
 }
 
 func main() {
@@ -134,23 +163,8 @@ func main() {
 	}
 
 	// load recipients
-	f, err := os.Open(recipient)
-	if err != nil {
+	if err = loadRecipients(); err != nil {
 		log.Fatal(err)
-	}
-	r := csv.NewReader(f)
-	records, err := r.ReadAll()
-	if err != nil {
-		log.Fatal(err)
-	}
-	f.Close()
-	for _, rec := range records {
-		recipients = append(recipients, &Recipient{
-			Name:   rec[0],
-			Title:  rec[1],
-			Email:  rec[2],
-			Status: rec[3],
-		})
 	}
 
 	fmt.Printf("Sending to %v recipients ", len(recipients))
@@ -159,6 +173,7 @@ func main() {
 			fmt.Print("✓")
 			continue
 		}
+
 		err := sendTo(reci)
 		if err == nil {
 			reci.Status = "ok"
@@ -166,7 +181,10 @@ func main() {
 		} else {
 			fmt.Print("✗")
 		}
-		saveState()
 	}
 	fmt.Println()
+
+	if err = saveState(); err != nil {
+		log.Fatal(err)
+	}
 }
