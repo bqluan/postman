@@ -9,7 +9,10 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/signal"
+	"sync"
 
+	"github.com/cheggaaa/pb/v3"
 	"github.com/spf13/pflag"
 	"gopkg.in/gomail.v2"
 )
@@ -25,7 +28,9 @@ var (
 	attach    string
 	recipient string
 
-	tmpl *template.Template
+	tmpl            *template.Template
+	saveStateLock   sync.RWMutex
+	saveStateCalled bool
 )
 
 type Recipient struct {
@@ -107,6 +112,15 @@ func sendTo(r *Recipient) error {
 }
 
 func saveState() error {
+	saveStateLock.Lock()
+	defer saveStateLock.Unlock()
+
+	if saveStateCalled {
+		return nil
+	} else {
+		saveStateCalled = true
+	}
+
 	var records [][]string
 	for _, reci := range recipients {
 		records = append(records, []string{reci.Name, reci.Title, reci.Email, reci.Status})
@@ -122,6 +136,8 @@ func saveState() error {
 }
 
 func loadRecipients() error {
+	log.Printf("Loading recipients from %s", recipients)
+
 	f, err := os.Open(recipient)
 	if err != nil {
 		return err
@@ -145,7 +161,71 @@ func loadRecipients() error {
 		})
 	}
 
+	log.Printf("%d recipients loaded", len(recipients))
 	return nil
+}
+
+func run() error {
+	stopCh := make(chan struct{})
+
+	shutdownCh := make(chan os.Signal, 1)
+	signal.Notify(shutdownCh, os.Interrupt)
+	go func() {
+		<-shutdownCh
+		close(stopCh)
+		<-shutdownCh
+		saveState()
+		os.Exit(1) // second signal. Exit directly.
+	}()
+
+	stoppedCh, err := nonBlockingRun(stopCh)
+	if err != nil {
+		return err
+	}
+
+	<-stoppedCh
+
+	return saveState()
+}
+
+func nonBlockingRun(stopCh <-chan struct{}) (<-chan struct{}, error) {
+	stoppedCh := make(chan struct{})
+
+	go func() {
+		bar := pb.StartNew(len(recipients))
+		bar.SetWriter(os.Stdout)
+
+	loop:
+		for _, reci := range recipients {
+			select {
+			case <-stopCh:
+				break loop
+			default:
+			}
+
+			// skip recipient already sent
+			if reci.Status == "ok" {
+				bar.Increment()
+				log.Printf("Skipping %s, already sent", reci.Email)
+				continue loop
+			}
+
+			log.Printf("Sending email to %s...", reci.Email)
+			if err := sendTo(reci); err != nil {
+				log.Printf("Error sending email to %s: %v", reci.Email, err)
+				continue loop
+			}
+
+			log.Printf("Email sent to %s", reci.Email)
+			reci.Status = "ok"
+			bar.Increment()
+		}
+
+		bar.Finish()
+		close(stoppedCh)
+	}()
+
+	return stoppedCh, nil
 }
 
 func main() {
@@ -153,38 +233,26 @@ func main() {
 	makeSureRequiredFlagsExist()
 
 	// load template
+	log.Printf("Loading template from %s", tmplFile)
 	buf, err := ioutil.ReadFile(tmplFile)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
+		os.Exit(1)
 	}
 	tmpl, err = template.New("body").Parse(string(buf))
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
 	// load recipients
 	if err = loadRecipients(); err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
+		os.Exit(1)
 	}
 
-	fmt.Printf("Sending to %v recipients ", len(recipients))
-	for _, reci := range recipients {
-		if reci.Status == "ok" {
-			fmt.Print("✓")
-			continue
-		}
-
-		err := sendTo(reci)
-		if err == nil {
-			reci.Status = "ok"
-			fmt.Print("✓")
-		} else {
-			fmt.Print("✗")
-		}
-	}
-	fmt.Println()
-
-	if err = saveState(); err != nil {
-		log.Fatal(err)
+	if err = run(); err != nil {
+		fmt.Println(err)
+		os.Exit(1)
 	}
 }
